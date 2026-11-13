@@ -1,0 +1,80 @@
+name: Refresh Sanctuary Google Reviews
+
+# Run on demand; one initial push event lets the newly added workflow test itself.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refresh-sanctuary-reviews.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  collect-reviews:
+    name: Collect & validate public Google reviews
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - name: Check out existing Sanctuary website
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install existing dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run existing Google Maps review collection
+        run: npm run scrape:reviews
+
+      - name: Validate collection against archive
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const before = JSON.parse(execFileSync('git', ['show', 'HEAD:src/lib/data/reviews.json'], { encoding:'utf8' }));
+          const after = JSON.parse(readFileSync('src/lib/data/reviews.json', 'utf8'));
+          const oldReviews = before.reviews ?? [];
+          const newReviews = after.reviews ?? [];
+          if (newReviews.length < oldReviews.length) {
+            throw new Error('Incomplete collection ('+newReviews.length+' vs '+oldReviews.length+'); refusing to publish.');
+          }
+          const names = new Set();
+          for (const r of newReviews) {
+            if (!r.name || !r.text || !Number.isInteger(r.rating) || r.rating < 1 || r.rating > 5) {
+              throw new Error('Invalid review: '+JSON.stringify(r).slice(0,200));
+            }
+            const key = r.name.trim().toLowerCase()+'|'+r.text.trim().toLowerCase();
+            if (names.has(key)) throw new Error('Duplicate review: '+r.name);
+            names.add(key);
+          }
+          const oldKeys = new Set(oldReviews.map(r=>r.name.trim().toLowerCase()+'|'+r.text.trim().toLowerCase()));
+          const newlySeen = newReviews.filter(r=>!oldKeys.has(r.name.trim().toLowerCase()+'|'+r.text.trim().toLowerCase()));
+          console.log('Old archive:',oldReviews.length);
+          console.log('Latest collected:',newReviews.length);
+          console.log('Unmatched reviews compared with old archive:',newlySeen.length);
+          console.log('New review names:',newlySeen.map(x=>x.name).join('; ')||'(none)');
+          console.log('Review collection captured at:',after.scrapedAt);
+          JS
+
+      - name: Upload verified review collection for manual website review
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanctuary-google-reviews
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src/lib/data/reviews.json
+            static/images/avatars/*.webp
+            static/images/avatars/*.svg
+
+# No commit, website deployment, or destructive overwrite takes place.
